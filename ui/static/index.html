@@ -1,0 +1,1469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Swiss Army Knife MQTT Browser</title>
+  <style>
+    :root {
+      --bg:          #0d1117;
+      --panel:       #161b22;
+      --border:      #30363d;
+      --text:        #c9d1d9;
+      --text-dim:    #8b949e;
+      --btn-primary: #238636;
+      --btn-hover:   #2ea043;
+      --btn-danger:  #da3633;
+      --btn-danger-hover: #f85149;
+      --btn-neutral: #21262d;
+      --btn-neutral-hover: #30363d;
+      --status-connected:    #3fb950;
+      --status-connecting:   #d29922;
+      --status-disconnected: #8b949e;
+      --status-error:        #f85149;
+      --msg-strip:   #1c2128;
+      --input-bg:    #0d1117;
+      --focus:       #388bfd;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ───────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; flex: 1; }
+    header h1 span { color: var(--text-dim); font-weight: 400; }
+
+    /* ── Layout ───────────────────────────────────────────── */
+    main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+    }
+    #connections-panel { width: 380px; flex-shrink: 0; }
+    #events-panel      { flex: 1; border-right: none; }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .panel-header h2 { font-size: 13px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+
+    .panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    /* ── Buttons ──────────────────────────────────────────── */
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      background: var(--btn-neutral);
+      color: var(--text);
+      transition: background .15s, border-color .15s;
+    }
+    button:hover { background: var(--btn-neutral-hover); }
+    button:disabled { opacity: .45; cursor: default; }
+
+    .btn-primary   { background: var(--btn-primary);  border-color: #2ea043; color: #fff; }
+    .btn-primary:hover { background: var(--btn-hover); }
+    .btn-danger    { background: var(--btn-danger);   border-color: #f85149; color: #fff; }
+    .btn-danger:hover  { background: var(--btn-danger-hover); }
+    .btn-icon      { padding: 3px 8px; font-size: 12px; }
+    .btn-sm        { padding: 3px 10px; font-size: 12px; }
+
+    /* ── Connection cards ─────────────────────────────────── */
+    .conn-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .conn-card:last-child { margin-bottom: 0; }
+
+    .status-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--status-disconnected);
+      cursor: pointer;
+    }
+    .status-dot.connected    { background: var(--status-connected); box-shadow: 0 0 6px var(--status-connected); }
+    .status-dot.connecting   { background: var(--status-connecting); animation: pulse 1.2s infinite; }
+    .status-dot.error        { background: var(--status-error); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: .3; }
+    }
+
+    .conn-info { flex: 1; min-width: 0; }
+    .conn-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .conn-url  { color: var(--text-dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .conn-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+    .empty-state {
+      color: var(--text-dim);
+      text-align: center;
+      padding: 40px 20px;
+      font-size: 13px;
+    }
+
+    /* ── View tabs ────────────────────────────────────────── */
+    .view-tabs { display: flex; gap: 4px; margin-left: auto; }
+    .view-tab {
+      padding: 2px 10px;
+      font-size: 12px;
+      border-radius: 4px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+    .view-tab.active {
+      background: var(--btn-neutral-hover);
+      color: var(--text);
+      border-color: var(--focus);
+    }
+
+    /* ── Filter bar ───────────────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .filter-bar input[type="search"] {
+      flex: 1;
+      min-width: 140px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      color: var(--text);
+      font-size: 12px;
+    }
+    .filter-bar input[type="search"]:focus {
+      outline: none;
+      border-color: var(--focus);
+    }
+    .filter-bar select {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      color: var(--text);
+      font-size: 12px;
+    }
+    .filter-toggle {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    /* ── History bar ──────────────────────────────────────── */
+    .history-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      background: #1a2b4a;
+      border-bottom: 1px solid #2d4a7a;
+      font-size: 12px;
+      color: #79c0ff;
+      flex-shrink: 0;
+    }
+    .history-bar span { flex: 1; }
+
+    /* ── Event stream ─────────────────────────────────────── */
+    #events-list {
+      display: flex;
+      flex-direction: column-reverse;
+    }
+
+    .event-row {
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 100px 80px minmax(0,1fr);
+      gap: 10px;
+      align-items: baseline;
+      font-size: 12px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+    .event-row:nth-child(even) { background: var(--msg-strip); }
+
+    .event-time { color: var(--text-dim); font-size: 11px; }
+    .event-badge {
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+    }
+    .badge-status-connected    { background: #1a4731; color: var(--status-connected); }
+    .badge-status-connecting   { background: #3d2f08; color: var(--status-connecting); }
+    .badge-status-disconnected { background: #21262d; color: var(--text-dim); }
+    .badge-status-error        { background: #3d1c1c; color: var(--status-error); }
+    .badge-message             { background: #1a2b4a; color: #79c0ff; }
+    .badge-system              { background: #21262d; color: var(--text-dim); }
+
+    .event-detail { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .event-detail .conn-label { color: var(--text-dim); }
+    .event-detail .topic-label { color: #79c0ff; }
+    .event-detail .payload-label { color: #a5d6ff; }
+    .event-detail .qos-label { color: var(--text-dim); font-size: 10px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; margin: 0 4px; vertical-align: middle; }
+    .event-detail .retained-label { color: #d2a679; font-size: 10px; background: #3d2b1a; border: 1px solid #7d4e2a; border-radius: 3px; padding: 0 4px; margin: 0 2px; vertical-align: middle; }
+    .event-detail .sp-label { color: #a371f7; font-size: 10px; background: #2d1f4a; border: 1px solid #6e40c9; border-radius: 3px; padding: 0 4px; margin: 0 2px; vertical-align: middle; }
+    .event-detail .err-label { color: var(--status-error); }
+
+    .event-row.expandable { cursor: pointer; }
+    .event-row.expandable:hover { background: #1f2937; }
+
+    /* ── Topic tree ───────────────────────────────────────── */
+    #tree-view {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+    details.tree-node { margin: 0; }
+    details.tree-node > summary {
+      padding: 4px 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      list-style: none;
+    }
+    details.tree-node > summary::-webkit-details-marker { display: none; }
+    details.tree-node > summary::before { content: "▸ "; font-size: 10px; color: var(--text-dim); }
+    details.tree-node[open] > summary::before { content: "▾ "; }
+    details.tree-node > summary:hover { background: var(--msg-strip); }
+    .tree-children { padding-left: 16px; }
+    .tree-segment { color: var(--text); font-weight: 500; }
+    .tree-value { color: #a5d6ff; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tree-dim { color: var(--text-dim); }
+    .tree-leaf {
+      padding: 3px 12px;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      cursor: pointer;
+      border-radius: 0;
+    }
+    .tree-leaf:hover { background: var(--msg-strip); }
+
+    /* connection-level rows override the base tree-node summary */
+    details.tree-node.tree-conn {
+      border-bottom: 1px solid var(--border);
+    }
+    details.tree-node.tree-conn > summary {
+      padding: 8px 12px;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 600;
+      background: rgba(255,255,255,0.025);
+    }
+    details.tree-node.tree-conn > summary::before { font-size: 11px; }
+    .tree-conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--status-disconnected);
+    }
+    .tree-conn-dot.connected  { background: var(--status-connected); box-shadow: 0 0 5px var(--status-connected); }
+    .tree-conn-dot.connecting { background: var(--status-connecting); animation: pulse 1.2s infinite; }
+    .tree-conn-dot.error      { background: var(--status-error); }
+    .tree-conn-name { flex: 1; }
+    .tree-conn-count { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+
+    /* ── Publish modal ────────────────────────────────────── */
+    #pub-modal .modal { width: 560px; }
+    .field textarea {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      width: 100%;
+      resize: vertical;
+      min-height: 100px;
+    }
+    .field textarea:focus {
+      outline: none;
+      border-color: var(--focus);
+      box-shadow: 0 0 0 3px rgba(56,139,253,.15);
+    }
+
+    /* ── Message detail modal ─────────────────────────────── */
+    #msg-modal .modal { width: 720px; }
+    #msg-modal .modal-body { padding: 0; }
+    .msg-meta {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .msg-meta-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; font-family: "SFMono-Regular", Consolas, monospace; }
+    .msg-meta-key { color: var(--text-dim); width: 52px; flex-shrink: 0; }
+    .msg-meta-val { color: var(--text); }
+    .msg-meta-val.topic { color: #79c0ff; }
+    .payload-container {
+      padding: 14px 20px;
+      overflow: auto;
+      max-height: 55vh;
+    }
+    .payload-pre {
+      margin: 0;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      color: #a5d6ff;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* ── Modal ────────────────────────────────────────────── */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.65);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    .modal-backdrop.hidden { display: none; }
+
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: 640px;
+      max-width: 95vw;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-header {
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center;
+    }
+    .modal-header h3 { flex: 1; font-size: 16px; }
+    .modal-body  { padding: 20px; overflow-y: auto; flex: 1; }
+    .modal-footer {
+      padding: 12px 20px;
+      border-top: 1px solid var(--border);
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+
+    /* ── Form ─────────────────────────────────────────────── */
+    .form-section { margin-bottom: 20px; }
+    .form-section-title {
+      font-size: 11px; font-weight: 600;
+      color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-grid .full { grid-column: 1 / -1; }
+
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+    .field input, .field select {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: var(--text);
+      font-size: 13px;
+      width: 100%;
+    }
+    .field input:focus, .field select:focus {
+      outline: none;
+      border-color: var(--focus);
+      box-shadow: 0 0 0 3px rgba(56,139,253,.15);
+    }
+    .field input[type="checkbox"] {
+      width: auto;
+      accent-color: var(--btn-primary);
+    }
+    .checkbox-row { flex-direction: row; align-items: center; gap: 8px; }
+
+    .sub-row {
+      display: flex; gap: 8px; margin-bottom: 6px; align-items: center;
+    }
+    .sub-row input  { flex: 1; }
+    .sub-row select { width: 90px; flex-shrink: 0; }
+
+    /* ── Scrollbar ────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+  <script src="/protobuf.min.js"></script>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────── -->
+<header>
+  <h1>Swiss Army Knife MQTT Browser <span>Automation Solutions LP</span></h1>
+  <button class="btn-primary" onclick="connectAll()">Connect All</button>
+  <button class="btn-danger"  onclick="disconnectAll()">Disconnect All</button>
+</header>
+
+<!-- ── Main ────────────────────────────────────────────────── -->
+<main>
+
+  <!-- Connections panel -->
+  <section class="panel" id="connections-panel">
+    <div class="panel-header">
+      <h2>Connections</h2>
+      <button class="btn-sm btn-primary" onclick="openAddModal()">+ Add</button>
+    </div>
+    <div class="panel-body" id="connections-list">
+      <div class="empty-state" id="connections-empty">No connections configured.</div>
+    </div>
+  </section>
+
+  <!-- Events panel -->
+  <section class="panel" id="events-panel">
+    <div class="panel-header">
+      <h2 id="panel-title">Event Stream</h2>
+      <span id="sse-indicator" style="font-size:11px;color:var(--text-dim)">⬤ disconnected</span>
+      <div id="tree-controls" style="display:none;gap:4px;align-items:center">
+        <button class="btn-sm" onclick="expandAll()">Expand All</button>
+        <button class="btn-sm" onclick="collapseAll()">Collapse All</button>
+      </div>
+      <div class="view-tabs">
+        <button class="view-tab active" data-view="stream" onclick="switchView('stream')">Stream</button>
+        <button class="view-tab" data-view="tree" onclick="switchView('tree')">Tree</button>
+      </div>
+    </div>
+    <div class="filter-bar" id="filter-bar">
+      <input type="search" id="filter-search" placeholder="Search topics &amp; payloads…" oninput="applyFilters()">
+      <select id="filter-conn" onchange="applyFilters()">
+        <option value="">All connections</option>
+      </select>
+      <label class="filter-toggle"><input type="checkbox" id="filter-retained" onchange="applyFilters()"> Retained</label>
+      <label class="filter-toggle"><input type="checkbox" id="filter-sparkplug" onchange="applyFilters()"> Sparkplug</label>
+      <button class="btn-sm" onclick="loadHistory()">History</button>
+      <button class="btn-sm" onclick="clearEvents()">Clear</button>
+    </div>
+    <div class="history-bar" id="history-bar" style="display:none">
+      <span id="history-status"></span>
+      <button class="btn-sm" onclick="resumeLive()">↩ Live</button>
+    </div>
+    <div class="panel-body" id="events-body" style="padding:0">
+      <div id="events-list"></div>
+      <div id="tree-view" style="display:none"></div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── Add / Edit Modal ─────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="modal-backdrop">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Add Connection</h3>
+    </div>
+    <div class="modal-body">
+      <form id="conn-form" onsubmit="return false">
+
+        <div class="form-section">
+          <div class="form-section-title">Identity</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="f-name">Name</label>
+              <input id="f-name" type="text" placeholder="My Broker" required />
+            </div>
+            <div class="field">
+              <label for="f-clientid">Client ID <small style="color:var(--text-dim)">(optional)</small></label>
+              <input id="f-clientid" type="text" placeholder="swarmy-client-1" />
+            </div>
+            <div class="field full">
+              <label for="f-url">Server URL</label>
+              <input id="f-url" type="text" placeholder="mqtt://localhost:1883" required />
+            </div>
+            <div class="field">
+              <label for="f-username">Username <small style="color:var(--text-dim)">(optional)</small></label>
+              <input id="f-username" type="text" placeholder="user" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="f-password">Password <small style="color:var(--text-dim)">(optional)</small></label>
+              <input id="f-password" type="text" placeholder="password" autocomplete="off"
+                     style="-webkit-text-security:disc; font-family:monospace;" />
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-section-title">Connection</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="f-keepalive">Keep Alive (s)</label>
+              <input id="f-keepalive" type="number" min="0" max="65535" value="60" />
+            </div>
+            <div class="field">
+              <label for="f-expiry">Session Expiry (s)</label>
+              <input id="f-expiry" type="number" min="0" value="3600" />
+            </div>
+            <div class="field checkbox-row full">
+              <input id="f-cleansession" type="checkbox" />
+              <label for="f-cleansession">Clean Session on initial connect</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-section-title">Last Will</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="f-willtopic">Will Topic <small style="color:var(--text-dim)">(optional)</small></label>
+              <input id="f-willtopic" type="text" placeholder="devices/client/status" />
+            </div>
+            <div class="field">
+              <label for="f-willqos">Will QoS</label>
+              <select id="f-willqos">
+                <option value="0">QoS 0 — At most once</option>
+                <option value="1">QoS 1 — At least once</option>
+                <option value="2">QoS 2 — Exactly once</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label for="f-willpayload">Will Payload</label>
+              <input id="f-willpayload" type="text" placeholder="offline" />
+            </div>
+            <div class="field checkbox-row full">
+              <input id="f-willretain" type="checkbox" />
+              <label for="f-willretain">Retain Will message</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-section-title">Subscriptions</div>
+          <div id="subs-container"></div>
+          <button type="button" class="btn-sm" onclick="addSubRow()">+ Add Subscription</button>
+        </div>
+
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveConnection()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Publish Modal ─────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="pub-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Publish Message</h3>
+    </div>
+    <div class="modal-body">
+      <form id="pub-form" onsubmit="return false">
+        <div class="form-grid" style="margin-bottom:12px">
+          <div class="field full">
+            <label for="pub-conn">Broker</label>
+            <select id="pub-conn"></select>
+          </div>
+          <div class="field full">
+            <label for="pub-topic">Topic</label>
+            <input id="pub-topic" type="text" placeholder="sensors/temp" required />
+          </div>
+          <div class="field">
+            <label for="pub-qos">QoS</label>
+            <select id="pub-qos">
+              <option value="0">QoS 0 — At most once</option>
+              <option value="1">QoS 1 — At least once</option>
+              <option value="2">QoS 2 — Exactly once</option>
+            </select>
+          </div>
+          <div class="field checkbox-row" style="align-self:end;padding-bottom:6px">
+            <input id="pub-retain" type="checkbox" />
+            <label for="pub-retain">Retain</label>
+          </div>
+          <div class="field full">
+            <label for="pub-payload">Payload</label>
+            <textarea id="pub-payload" placeholder='{"key": "value"}'></textarea>
+          </div>
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button onclick="closePubModal()">Cancel</button>
+      <button class="btn-primary" onclick="publishMessage()">Publish</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Message Detail Modal ─────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="msg-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Message Detail</h3>
+    </div>
+    <div class="modal-body">
+      <div class="msg-meta" id="msg-meta"></div>
+      <div class="payload-container">
+        <pre class="payload-pre" id="msg-payload"></pre>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button onclick="closeMsgModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────
+const state = {
+  connections: {},  // id -> ConnectionItem
+  statuses:    {},  // id -> status string
+};
+
+const messageLog = [];        // newest-first, all received messages (max 10 000)
+const MAX_LOG    = 10_000;
+const topicTree  = {};                // connId → { name, connId, children } grouped by connection
+
+let activeView   = 'stream';  // 'stream' | 'tree'
+let historyMode  = false;
+let sseSource    = null;
+
+const filters = { search: '', connId: '', retained: false, sparkplug: false };
+
+// ── Init ──────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  loadConnections();
+  setupSSE();
+  initSparkplug();
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeModal(); closePubModal(); closeMsgModal(); }
+  });
+});
+
+// ── Connection CRUD ───────────────────────────────────────────
+async function loadConnections() {
+  try {
+    const res = await fetch('/api/connection');
+    const items = await res.json();
+    state.connections = {};
+    (items || []).forEach(c => state.connections[c.id] = c);
+    renderConnections();
+  } catch (e) {
+    console.error('failed to load connections', e);
+  }
+}
+
+async function connectAll() {
+  await fetch('/api/mqtt/connect', { method: 'POST' });
+}
+
+async function disconnectAll() {
+  await fetch('/api/mqtt/disconnect', { method: 'POST' });
+}
+
+async function toggleConnection(id) {
+  const status = state.statuses[id] || 'disconnected';
+  const action = status === 'connected' ? 'disconnect' : 'connect';
+  await fetch(`/api/mqtt/${action}/${encodeURIComponent(id)}`, { method: 'POST' });
+}
+
+async function deleteConnection(id) {
+  const name = state.connections[id]?.name || id;
+  if (!confirm(`Delete connection "${name}"?`)) return;
+  await fetch(`/api/connection/${id}`, { method: 'DELETE' });
+  delete state.connections[id];
+  delete state.statuses[id];
+  renderConnections();
+}
+
+// ── Render connections ────────────────────────────────────────
+function renderConnections() {
+  const list  = document.getElementById('connections-list');
+  const empty = document.getElementById('connections-empty');
+  const ids   = Object.keys(state.connections);
+
+  if (ids.length === 0) {
+    list.querySelectorAll('.conn-card').forEach(el => el.remove());
+    empty.style.display = 'block';
+    rebuildConnFilter();
+    return;
+  }
+  empty.style.display = 'none';
+
+  list.querySelectorAll('.conn-card').forEach(el => el.remove());
+  ids.forEach(id => {
+    const c      = state.connections[id];
+    const status = state.statuses[id] || 'disconnected';
+    const card   = document.createElement('div');
+    card.className = 'conn-card';
+    card.innerHTML = `
+      <div class="status-dot ${status}" title="Click to ${status === 'connected' ? 'disconnect' : 'connect'}" onclick="toggleConnection('${esc(id)}')"></div>
+      <div class="conn-info">
+        <div class="conn-name">${esc(c.name)}</div>
+        <div class="conn-url">${esc(c.mqttserverurl)}</div>
+      </div>
+      <div class="conn-actions">
+        <button class="btn-icon btn-primary" ${status === 'connected' ? '' : 'disabled'} onclick="openPubModal('${esc(id)}')">Pub</button>
+        <button class="btn-icon" onclick="openEditModal('${esc(id)}')">Edit</button>
+        <button class="btn-icon btn-danger" onclick="deleteConnection('${esc(id)}')">Del</button>
+      </div>`;
+    list.appendChild(card);
+  });
+
+  rebuildConnFilter();
+}
+
+function rebuildConnFilter() {
+  const sel = document.getElementById('filter-conn');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All connections</option>';
+  Object.entries(state.connections).forEach(([id, c]) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = c.name;
+    if (id === current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+// ── Modal ─────────────────────────────────────────────────────
+let editingId = null;
+
+function openAddModal() {
+  editingId = null;
+  document.getElementById('modal-title').textContent = 'Add Connection';
+  resetForm();
+  document.getElementById('modal-backdrop').classList.remove('hidden');
+}
+
+function openEditModal(id) {
+  editingId = id;
+  document.getElementById('modal-title').textContent = 'Edit Connection';
+  populateForm(state.connections[id]);
+  document.getElementById('modal-backdrop').classList.remove('hidden');
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.add('hidden');
+}
+
+function resetForm() {
+  document.getElementById('f-name').value        = '';
+  document.getElementById('f-clientid').value    = '';
+  document.getElementById('f-url').value         = '';
+  document.getElementById('f-username').value    = '';
+  document.getElementById('f-password').value    = '';
+  document.getElementById('f-keepalive').value   = '60';
+  document.getElementById('f-expiry').value      = '3600';
+  document.getElementById('f-cleansession').checked = false;
+  document.getElementById('f-willtopic').value   = '';
+  document.getElementById('f-willqos').value     = '0';
+  document.getElementById('f-willpayload').value = '';
+  document.getElementById('f-willretain').checked = false;
+  document.getElementById('subs-container').innerHTML = '';
+}
+
+function populateForm(c) {
+  resetForm();
+  document.getElementById('f-name').value        = c.name        || '';
+  document.getElementById('f-clientid').value    = c.clientid    || '';
+  document.getElementById('f-url').value         = c.mqttserverurl || '';
+  document.getElementById('f-username').value    = c.username    || '';
+  document.getElementById('f-password').value    = c.password    || '';
+  document.getElementById('f-keepalive').value   = c.keepalive   ?? 60;
+  document.getElementById('f-expiry').value      = c.sessionexpiryinterval ?? 3600;
+  document.getElementById('f-cleansession').checked = !!c.cleansession;
+  document.getElementById('f-willtopic').value   = c.willtopic   || '';
+  document.getElementById('f-willqos').value     = c.willqos     ?? 0;
+  document.getElementById('f-willpayload').value = c.willpayload || '';
+  document.getElementById('f-willretain').checked = !!c.willretain;
+  (c.subs || []).forEach(s => addSubRow(s.topic, s.qos));
+}
+
+function addSubRow(topic = '', qos = 0) {
+  const container = document.getElementById('subs-container');
+  const row = document.createElement('div');
+  row.className = 'sub-row';
+  row.innerHTML = `
+    <input type="text" class="sub-topic" placeholder="sensors/#" value="${esc(topic)}" />
+    <select class="sub-qos">
+      <option value="0" ${qos == 0 ? 'selected' : ''}>QoS 0</option>
+      <option value="1" ${qos == 1 ? 'selected' : ''}>QoS 1</option>
+      <option value="2" ${qos == 2 ? 'selected' : ''}>QoS 2</option>
+    </select>
+    <button type="button" class="btn-icon btn-danger" onclick="this.parentElement.remove()">✕</button>`;
+  container.appendChild(row);
+}
+
+function getFormData() {
+  const subs = [...document.querySelectorAll('#subs-container .sub-row')]
+    .map(row => ({
+      topic: row.querySelector('.sub-topic').value.trim(),
+      qos:   Number.parseInt(row.querySelector('.sub-qos').value, 10),
+    }))
+    .filter(s => s.topic !== '');
+
+  return {
+    id:                    editingId || '',
+    name:                  document.getElementById('f-name').value.trim(),
+    mqttserverurl:         document.getElementById('f-url').value.trim(),
+    clientid:              document.getElementById('f-clientid').value.trim(),
+    username:              document.getElementById('f-username').value.trim(),
+    password:              document.getElementById('f-password').value,
+    keepalive:             Number.parseInt(document.getElementById('f-keepalive').value, 10) || 60,
+    sessionexpiryinterval: Number.parseInt(document.getElementById('f-expiry').value, 10)    || 0,
+    cleansession:          document.getElementById('f-cleansession').checked,
+    willtopic:             document.getElementById('f-willtopic').value.trim(),
+    willqos:               Number.parseInt(document.getElementById('f-willqos').value, 10),
+    willpayload:           document.getElementById('f-willpayload').value.trim(),
+    willretain:            document.getElementById('f-willretain').checked,
+    subs,
+  };
+}
+
+async function saveConnection() {
+  const data = getFormData();
+  if (!data.name)          { alert('Name is required.');       return; }
+  if (!data.mqttserverurl) { alert('Server URL is required.'); return; }
+
+  const isNew  = !editingId;
+  const url    = isNew ? '/api/connection' : `/api/connection/${editingId}`;
+  const method = isNew ? 'POST' : 'PUT';
+
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) { alert(`Save failed: ${await res.text()}`); return; }
+
+  if (isNew) {
+    const saved = await res.json();
+    state.connections[saved.id] = saved;
+  } else {
+    state.connections[editingId] = { ...data, id: editingId };
+  }
+
+  closeModal();
+  renderConnections();
+}
+
+// ── Publish ───────────────────────────────────────────────────
+function openPubModal(preselectedId) {
+  const sel = document.getElementById('pub-conn');
+  sel.innerHTML = '';
+  const connectedIds = Object.keys(state.connections).filter(id => state.statuses[id] === 'connected');
+  if (connectedIds.length === 0) { alert('No connected brokers.'); return; }
+  connectedIds.forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = state.connections[id].name;
+    if (id === preselectedId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  document.getElementById('pub-topic').value    = '';
+  document.getElementById('pub-payload').value  = '';
+  document.getElementById('pub-qos').value      = '0';
+  document.getElementById('pub-retain').checked = false;
+  document.getElementById('pub-modal').classList.remove('hidden');
+  document.getElementById('pub-topic').focus();
+}
+
+function closePubModal() {
+  document.getElementById('pub-modal').classList.add('hidden');
+}
+
+async function publishMessage() {
+  const id      = document.getElementById('pub-conn').value;
+  const topic   = document.getElementById('pub-topic').value.trim();
+  const payload = document.getElementById('pub-payload').value;
+  const qos     = Number.parseInt(document.getElementById('pub-qos').value, 10);
+  const retain  = document.getElementById('pub-retain').checked;
+
+  if (!topic) { alert('Topic is required.'); return; }
+
+  const res = await fetch(`/api/mqtt/publish/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, payload, qos, retain }),
+  });
+
+  if (!res.ok) { alert(`Publish failed: ${await res.text()}`); return; }
+  closePubModal();
+}
+
+// ── SSE ───────────────────────────────────────────────────────
+function setupSSE() {
+  if (sseSource) sseSource.close();
+  sseSource = new EventSource('/api/mqtt/events');
+
+  sseSource.onopen = () => {
+    const ind = document.getElementById('sse-indicator');
+    ind.textContent = '⬤ connected';
+    ind.style.color = 'var(--status-connected)';
+  };
+
+  sseSource.onerror = () => {
+    const ind = document.getElementById('sse-indicator');
+    ind.textContent = '⬤ reconnecting…';
+    ind.style.color = 'var(--status-connecting)';
+  };
+
+  sseSource.onmessage = e => {
+    try { handleSSEEvent(JSON.parse(e.data)); }
+    catch (err) { console.warn('SSE parse error', err); }
+  };
+}
+
+function handleSSEEvent(event) {
+  if (event.type === 'connection_status' && event.connectionId) {
+    state.statuses[event.connectionId] = event.status;
+    renderConnections();
+  }
+
+  if (event.type === 'message') {
+    messageLog.unshift(event);
+    if (messageLog.length > MAX_LOG) messageLog.pop();
+    updateTopicTreeData(event);
+  }
+
+  if (!historyMode && activeView === 'stream' && matchesFilter(event)) {
+    const list = document.getElementById('events-list');
+    list.prepend(buildEventRow(event));
+    while (list.children.length > 500) list.lastChild.remove();
+  }
+
+  if (activeView === 'tree' && event.type === 'message') {
+    scheduleTreeRender();
+  }
+}
+
+// ── Filter ────────────────────────────────────────────────────
+function applyFilters() {
+  filters.search   = document.getElementById('filter-search').value.trim();
+  filters.connId   = document.getElementById('filter-conn').value;
+  filters.retained = document.getElementById('filter-retained').checked;
+  filters.sparkplug = document.getElementById('filter-sparkplug').checked;
+
+  if (historyMode) return; // history results are already rendered; refetch when needed
+
+  const list = document.getElementById('events-list');
+  list.innerHTML = '';
+  const toShow = messageLog.filter(matchesFilter).slice(0, 500);
+  // With column-reverse: first appendChild → bottom; subsequent → above.
+  // messageLog[0] = newest → append first → appears at bottom ✓
+  for (const event of toShow) {
+    list.appendChild(buildEventRow(event));
+  }
+}
+
+function matchesFilter(event) {
+  if (event.type !== 'message') {
+    // Status events: only show when no message-specific filters are active
+    return !filters.search && !filters.retained && !filters.sparkplug && !filters.connId;
+  }
+  if (filters.connId   && event.connectionId !== filters.connId) return false;
+  if (filters.retained && !event.retained)                       return false;
+  if (filters.sparkplug && !event.isSparkplug)                   return false;
+  if (filters.search) {
+    const q = filters.search.toLowerCase();
+    if (!(event.topic || '').toLowerCase().includes(q) &&
+        !(event.payload || '').toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+function buildEventRow(event) {
+  const ts     = formatTime(event.timestamp);
+  const badge  = badgeFor(event);
+  const detail = detailFor(event);
+
+  const row = document.createElement('div');
+  row.className = event.type === 'message' ? 'event-row expandable' : 'event-row';
+  row.innerHTML = `
+    <span class="event-time">${ts}</span>
+    <span class="event-badge ${badge.cls}">${badge.label}</span>
+    <span class="event-detail">${detail}</span>`;
+  if (event.type === 'message') {
+    row.addEventListener('click', () => showMsgDetail(event));
+  }
+  return row;
+}
+
+function clearEvents() {
+  historyMode = false;
+  document.getElementById('history-bar').style.display = 'none';
+  document.getElementById('events-list').innerHTML = '';
+  if (activeView === 'stream') {
+    // Also clear message log so future applyFilters doesn't re-show old items
+    messageLog.length = 0;
+  }
+}
+
+// ── History ───────────────────────────────────────────────────
+async function loadHistory() {
+  const params = new URLSearchParams();
+  if (filters.search)    params.set('q',         filters.search);
+  if (filters.connId)    params.set('conn',       filters.connId);
+  if (filters.retained)  params.set('retained',   'true');
+  if (filters.sparkplug) params.set('sparkplug',  'true');
+  params.set('limit', '500');
+
+  try {
+    const res = await fetch('/api/messages?' + params);
+    if (!res.ok) { console.error('history fetch failed', res.status); return; }
+    const data = await res.json();
+
+    historyMode = true;
+    const bar = document.getElementById('history-bar');
+    bar.style.display = 'flex';
+    document.getElementById('history-status').textContent =
+      `${data.messages.length} of ${data.total} stored messages`;
+
+    const list = document.getElementById('events-list');
+    list.innerHTML = '';
+    // API returns newest-first; append newest first → column-reverse puts newest at bottom ✓
+    for (const msg of data.messages) {
+      list.appendChild(buildEventRow(msg));
+    }
+  } catch (e) {
+    console.error('loadHistory failed', e);
+  }
+}
+
+function resumeLive() {
+  historyMode = false;
+  document.getElementById('history-bar').style.display = 'none';
+  applyFilters();
+}
+
+// ── View switching ────────────────────────────────────────────
+function switchView(view) {
+  activeView = view;
+  document.querySelectorAll('.view-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.view === view));
+
+  const streamEl = document.getElementById('events-list');
+  const treeEl   = document.getElementById('tree-view');
+  const filterEl = document.getElementById('filter-bar');
+  const ctrlEl   = document.getElementById('tree-controls');
+
+  streamEl.style.display = view === 'stream' ? '' : 'none';
+  treeEl.style.display   = view === 'tree'   ? '' : 'none';
+  filterEl.style.display = view === 'stream' ? '' : 'none';
+  ctrlEl.style.display   = view === 'tree'   ? 'flex' : 'none';
+
+  document.getElementById('panel-title').textContent =
+    view === 'stream' ? 'Event Stream' : 'Topic Tree';
+
+  if (view === 'tree') renderTopicTree();
+}
+
+// ── Topic tree ────────────────────────────────────────────────
+// openPaths: paths whose <details> are currently expanded (updated via toggle events).
+// seenPaths: paths ever rendered — lets us distinguish "user closed it" from "never opened".
+const openPaths = new Set();
+const seenPaths = new Set();
+
+function updateTopicTreeData(event) {
+  if (!event.topic || !event.connectionId) return;
+  if (!topicTree[event.connectionId]) {
+    topicTree[event.connectionId] = { connId: event.connectionId, name: event.name || event.connectionId, children: {} };
+  }
+  topicTree[event.connectionId].name = event.name || event.connectionId;
+
+  const segs = event.topic.split('/');
+  let node = topicTree[event.connectionId];
+  for (const seg of segs) {
+    if (!node.children[seg]) node.children[seg] = { children: {}, latestEvent: null };
+    node = node.children[seg];
+  }
+  node.latestEvent = event;
+}
+
+let treeRenderTimer = null;
+function scheduleTreeRender() {
+  if (treeRenderTimer) return;
+  treeRenderTimer = setTimeout(() => {
+    treeRenderTimer = null;
+    if (activeView === 'tree') renderTopicTree();
+  }, 150);
+}
+
+// createTreeDetails makes a <details> that tracks its own open/closed state
+// in openPaths so that re-renders restore the user's expansion choices.
+function createTreeDetails(path, defaultOpen) {
+  const el = document.createElement('details');
+  el.className = 'tree-node';
+  el.dataset.path = path;
+
+  if (seenPaths.has(path)) {
+    el.open = openPaths.has(path);
+  } else {
+    seenPaths.add(path);
+    el.open = defaultOpen;
+    if (defaultOpen) openPaths.add(path);
+  }
+
+  el.addEventListener('toggle', () => {
+    if (el.open) openPaths.add(path);
+    else openPaths.delete(path);
+  });
+  return el;
+}
+
+function renderTopicTree() {
+  const container = document.getElementById('tree-view');
+  container.innerHTML = '';
+
+  const connIds = Object.keys(topicTree);
+  if (connIds.length === 0) {
+    container.innerHTML = '<div class="empty-state">No messages received yet.</div>';
+    return;
+  }
+
+  connIds.sort((a, b) => topicTree[a].name.localeCompare(topicTree[b].name));
+
+  for (const connId of connIds) {
+    const conn     = topicTree[connId];
+    const connPath = `conn:${connId}`;
+    const status   = state.statuses[connId] || 'disconnected';
+    const leafCount = countLeaves(conn.children);
+
+    const details = createTreeDetails(connPath, true);  // connections default open
+    details.classList.add('tree-conn');
+
+    const sum = document.createElement('summary');
+    sum.innerHTML = `
+      <span class="tree-conn-dot ${status}"></span>
+      <span class="tree-conn-name">${esc(conn.name)}</span>
+      <span class="tree-conn-count">${leafCount} topic${leafCount !== 1 ? 's' : ''}</span>`;
+    details.appendChild(sum);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'tree-children';
+    renderTreeChildren(wrap, conn.children, connPath, 1);
+    details.appendChild(wrap);
+    container.appendChild(details);
+  }
+}
+
+// pathPrefix accumulates the full topic path so each <details> gets a stable,
+// connection-scoped key that survives re-renders.
+function renderTreeChildren(container, children, pathPrefix, depth) {
+  const segs = Object.keys(children).sort();
+  for (const seg of segs) {
+    const node    = children[seg];
+    const path    = `${pathPrefix}/${seg}`;
+    const hasKids = Object.keys(node.children).length > 0;
+
+    if (hasKids) {
+      const details = createTreeDetails(path, depth <= 2);
+
+      const sum = document.createElement('summary');
+      let html = `<span class="tree-segment">${esc(seg)}</span>`;
+      if (node.latestEvent) {
+        html += ` <span class="tree-dim">→</span> <span class="tree-value">${esc(truncate(node.latestEvent.payload || '', 60))}</span>`;
+      }
+      sum.innerHTML = html;
+      details.appendChild(sum);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'tree-children';
+      renderTreeChildren(wrap, node.children, path, depth + 1);
+      details.appendChild(wrap);
+      container.appendChild(details);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'tree-leaf';
+      const e = node.latestEvent;
+      const val  = e ? `<span class="tree-value">${esc(truncate(e.payload || '', 80))}</span>` : '';
+      const tags = e ? [
+        `<span class="tree-dim">q${e.qos ?? 0}</span>`,
+        e.retained    ? `<span class="retained-label">R</span>` : '',
+        e.isSparkplug ? `<span class="sp-label">SP</span>`    : '',
+      ].join('') : '';
+      div.innerHTML = `<span class="tree-segment">${esc(seg)}</span> <span class="tree-dim">→</span> ${val}${tags}`;
+      if (e) div.addEventListener('click', () => showMsgDetail(e));
+      container.appendChild(div);
+    }
+  }
+}
+
+function expandAll() {
+  document.querySelectorAll('#tree-view details.tree-node').forEach(el => {
+    el.open = true;
+    if (el.dataset.path) openPaths.add(el.dataset.path);
+  });
+}
+
+function collapseAll() {
+  document.querySelectorAll('#tree-view details.tree-node').forEach(el => {
+    el.open = false;
+    if (el.dataset.path) openPaths.delete(el.dataset.path);
+  });
+}
+
+function countLeaves(children) {
+  let n = 0;
+  function walk(c) {
+    for (const node of Object.values(c)) {
+      if (node.latestEvent) n++;
+      if (Object.keys(node.children).length > 0) walk(node.children);
+    }
+  }
+  walk(children);
+  return n;
+}
+
+// ── Message detail modal ──────────────────────────────────────
+function showMsgDetail(event) {
+  const meta     = document.getElementById('msg-meta');
+  const ts       = formatTime(event.timestamp);
+  const sparkplug = tryDecodeSparkplug(event.payloadBytes);
+
+  function row(key, valHtml) {
+    return `<div class="msg-meta-row"><span class="msg-meta-key">${key}</span>${valHtml}</div>`;
+  }
+  function v(text) { return `<span class="msg-meta-val">${text}</span>`; }
+
+  const rows = [row('time', v(esc(ts)))];
+  if (event.name)     rows.push(row('conn',     v(esc(event.name))));
+  rows.push(row('topic', `<span class="msg-meta-val topic">${esc(event.topic || '')}</span>`));
+  rows.push(row('qos',  v(String(event.qos ?? 0))));
+  if (event.retained)    rows.push(row('retained', '<span class="msg-meta-val" style="color:#d2a679">yes</span>'));
+  if (event.isSparkplug) rows.push(row('format',   '<span class="msg-meta-val" style="color:#a371f7">Sparkplug B</span>'));
+  if (sparkplug)         rows.push(row('decoded',  '<span class="msg-meta-val" style="color:#a371f7">Sparkplug B</span>'));
+  meta.innerHTML = rows.join('');
+
+  let displayed;
+  if (sparkplug) {
+    displayed = JSON.stringify(sparkplug, null, 2);
+  } else {
+    const raw = event.payload || '';
+    displayed = raw;
+    try { displayed = JSON.stringify(JSON.parse(raw), null, 2); } catch { /* not JSON */ }
+  }
+  document.getElementById('msg-payload').textContent = displayed;
+  document.getElementById('msg-modal').classList.remove('hidden');
+}
+
+function closeMsgModal() {
+  document.getElementById('msg-modal').classList.add('hidden');
+}
+
+// ── Badge / detail renderers ──────────────────────────────────
+function badgeFor(event) {
+  if (event.type === 'message') return { cls: 'badge-message', label: 'msg' };
+  const s = event.status || '';
+  const map = {
+    connected:    { cls: 'badge-status-connected',    label: 'connected'    },
+    connecting:   { cls: 'badge-status-connecting',   label: 'connecting'   },
+    disconnected: { cls: 'badge-status-disconnected', label: 'disconnected' },
+    error:        { cls: 'badge-status-error',        label: 'error'        },
+  };
+  return map[s] || { cls: 'badge-system', label: event.type || 'sys' };
+}
+
+function detailFor(event) {
+  const name = event.name ? `<span class="conn-label">[${esc(event.name)}]</span> ` : '';
+  if (event.type === 'message') {
+    const topic    = `<span class="topic-label">${esc(event.topic)}</span>`;
+    const qos      = `<span class="qos-label">q${event.qos ?? 0}</span>`;
+    const retained = event.retained    ? `<span class="retained-label">R</span>` : '';
+    const sparkplug = event.isSparkplug ? `<span class="sp-label">SP</span>` : '';
+    const payload  = event.payload ? `<span class="payload-label">${esc(truncate(event.payload, 120))}</span>` : '';
+    return `${name}${topic}${qos}${retained}${sparkplug}${payload}`;
+  }
+  if (event.type === 'connection_status') {
+    const err = event.error ? ` <span class="err-label">— ${esc(event.error)}</span>` : '';
+    return `${name}${esc(event.status || '')}${err}`;
+  }
+  return `${name}${esc(event.status || '')}`;
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+function formatTime(isoStr) {
+  if (!isoStr) return '';
+  const d   = new Date(isoStr);
+  const hms = d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `${hms}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+function esc(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function truncate(s, n) {
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+// ── Sparkplug B ───────────────────────────────────────────────
+const SPARKPLUG_DATATYPES = {
+  0:'Unknown',  1:'Int8',    2:'Int16',   3:'Int32',   4:'Int64',
+  5:'UInt8',    6:'UInt16',  7:'UInt32',  8:'UInt64',
+  9:'Float',   10:'Double', 11:'Boolean',12:'String',
+ 13:'DateTime',14:'Text',   15:'UUID',   16:'DataSet',
+ 17:'Bytes',   18:'File',   19:'Template',20:'PropertySet',
+ 21:'PropertySetList',22:'Int8Array',23:'Int16Array',
+ 24:'Int32Array',25:'Int64Array',26:'UInt8Array',
+ 27:'UInt16Array',28:'UInt32Array',29:'UInt64Array',
+ 30:'FloatArray',31:'DoubleArray',32:'BooleanArray',
+ 33:'StringArray',34:'DateTimeArray',
+};
+
+const SPARKPLUG_PROTO = `
+syntax = "proto2";
+package org.eclipse.tahu.protobuf;
+message Payload {
+  message Template {
+    message Parameter {
+      optional string name = 1;
+      optional uint32 type = 2;
+      oneof value {
+        uint32 int_value = 3; uint64 long_value = 4; float float_value = 5;
+        double double_value = 6; bool boolean_value = 7; string string_value = 8;
+      }
+    }
+    optional string version = 1;
+    repeated Metric metrics = 2;
+    repeated Parameter parameters = 3;
+    optional string template_ref = 4;
+    optional bool is_definition = 5;
+  }
+  message DataSet {
+    message DataSetValue {
+      oneof value {
+        uint32 int_value = 1; uint64 long_value = 2; float float_value = 3;
+        double double_value = 4; bool boolean_value = 5; string string_value = 6;
+      }
+    }
+    message Row { repeated DataSetValue elements = 1; }
+    optional uint64 num_of_columns = 1;
+    repeated string columns = 2;
+    repeated uint32 types = 3;
+    repeated Row rows = 4;
+  }
+  message PropertyValue {
+    optional uint32 type = 1;
+    optional bool is_null = 2;
+    oneof value {
+      uint32 int_value = 3; uint64 long_value = 4; float float_value = 5;
+      double double_value = 6; bool boolean_value = 7; string string_value = 8;
+      PropertySet propertyset_value = 9; PropertySetList propertysets_value = 10;
+    }
+  }
+  message PropertySet {
+    repeated string keys = 1;
+    repeated PropertyValue values = 2;
+  }
+  message PropertySetList { repeated PropertySet propertyset = 1; }
+  message MetaData {
+    optional bool is_multi_part = 1; optional string content_type = 2;
+    optional uint64 size = 3; optional uint64 seq = 4;
+    optional string file_name = 5; optional string file_type = 6;
+    optional string md5 = 7; optional string description = 8;
+  }
+  message Metric {
+    optional string name = 1; optional uint64 alias = 2;
+    optional uint64 timestamp = 3; optional uint32 datatype = 4;
+    optional bool is_historical = 5; optional bool is_transient = 6;
+    optional bool is_null = 7; optional MetaData metadata = 8;
+    optional PropertySet properties = 9;
+    oneof value {
+      uint32 int_value = 10; uint64 long_value = 11; float float_value = 12;
+      double double_value = 13; bool boolean_value = 14; string string_value = 15;
+      bytes bytes_value = 16; DataSet dataset_value = 17; Template template_value = 18;
+    }
+  }
+  optional uint64 timestamp = 1;
+  repeated Metric metrics = 2;
+  optional uint64 seq = 3;
+  optional string uuid = 4;
+  optional bytes body = 5;
+}
+`;
+
+let sparkplugPayloadType = null;
+
+function initSparkplug() {
+  if (typeof protobuf === 'undefined') return;
+  try {
+    sparkplugPayloadType = protobuf.parse(SPARKPLUG_PROTO).root
+      .lookupType('org.eclipse.tahu.protobuf.Payload');
+  } catch (e) {
+    console.warn('Sparkplug B decoder init failed:', e);
+  }
+}
+
+function tryDecodeSparkplug(base64str) {
+  if (!sparkplugPayloadType || !base64str) return null;
+  try {
+    const bytes = Uint8Array.from(atob(base64str), c => c.codePointAt(0));
+    const msg   = sparkplugPayloadType.decode(bytes);
+    const obj   = sparkplugPayloadType.toObject(msg, { longs: Number, bytes: String, defaults: false });
+    if (obj.timestamp == null && (!obj.metrics || obj.metrics.length === 0)) return null;
+    if (obj.metrics) {
+      for (const m of obj.metrics) {
+        if (m.datatype != null) m.datatype = SPARKPLUG_DATATYPES[m.datatype] ?? m.datatype;
+      }
+    }
+    return obj;
+  } catch {
+    return null;
+  }
+}
+</script>
+</body>
+</html>
