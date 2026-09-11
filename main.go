@@ -418,14 +418,15 @@ func onPublishReceived(item ConnectionItem) func(paho.PublishReceived) (bool, er
 			IsSparkplug:  isSP,
 		})
 		if err := msgDB.Write(msgstore.Message{
-			Timestamp:   time.Now().UTC(),
-			ConnID:      item.ID,
-			ConnName:    item.Name,
-			Topic:       pr.Packet.Topic,
-			Payload:     string(pr.Packet.Payload),
-			QoS:         int(pr.Packet.QoS),
-			Retained:    pr.Packet.Retain,
-			IsSparkplug: isSP,
+			Timestamp:    time.Now().UTC(),
+			ConnID:       item.ID,
+			ConnName:     item.Name,
+			Topic:        pr.Packet.Topic,
+			Payload:      string(pr.Packet.Payload),
+			PayloadBytes: pr.Packet.Payload,
+			QoS:          int(pr.Packet.QoS),
+			Retained:     pr.Packet.Retain,
+			IsSparkplug:  isSP,
 		}); err != nil {
 			log.Printf("msgstore write: %v", err)
 		}
@@ -442,6 +443,7 @@ type messageJSON struct {
 	Name         string `json:"name"`
 	Topic        string `json:"topic"`
 	Payload      string `json:"payload"`
+	PayloadBytes []byte `json:"payloadBytes,omitempty"`
 	QoS          int    `json:"qos"`
 	Retained     bool   `json:"retained,omitempty"`
 	IsSparkplug  bool   `json:"isSparkplug,omitempty"`
@@ -495,6 +497,7 @@ func getMessages(w http.ResponseWriter, r *http.Request) {
 			Name:         m.ConnName,
 			Topic:        m.Topic,
 			Payload:      m.Payload,
+			PayloadBytes: m.PayloadBytes,
 			QoS:          m.QoS,
 			Retained:     m.Retained,
 			IsSparkplug:  m.IsSparkplug,

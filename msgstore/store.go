@@ -10,15 +10,16 @@ import (
 
 // Message is a single received MQTT message written to the store.
 type Message struct {
-	ID          int64
-	Timestamp   time.Time
-	ConnID      string
-	ConnName    string
-	Topic       string
-	Payload     string
-	QoS         int
-	Retained    bool
-	IsSparkplug bool
+	ID           int64
+	Timestamp    time.Time
+	ConnID       string
+	ConnName     string
+	Topic        string
+	Payload      string
+	PayloadBytes []byte
+	QoS          int
+	Retained     bool
+	IsSparkplug  bool
 }
 
 // Filter controls which messages Query returns.
@@ -76,6 +77,47 @@ func migrate(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_topic ON messages(topic);
 		CREATE INDEX IF NOT EXISTS idx_conn  ON messages(conn_id);
 	`)
+	if err != nil {
+		return err
+	}
+	// payload_bytes was added after the initial release — carries the raw
+	// message bytes losslessly (the payload TEXT column is lossy for binary
+	// payloads such as Sparkplug protobuf, since it round-trips through
+	// UTF-8 string/JSON encoding). Add it to pre-existing databases too.
+	return ensureColumn(db, "messages", "payload_bytes", "BLOB")
+}
+
+func ensureColumn(db *sql.DB, table, column, sqlType string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var (
+		cid       int
+		name      string
+		colType   string
+		notNull   int
+		dfltValue any
+		pk        int
+		found     bool
+	)
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + sqlType)
 	return err
 }
 
@@ -86,10 +128,10 @@ func (s *Store) Write(m Message) error {
 	}
 	r, sp := btoi(m.Retained), btoi(m.IsSparkplug)
 	_, err := s.db.Exec(
-		`INSERT INTO messages (timestamp,conn_id,conn_name,topic,payload,qos,retained,is_sparkplug)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		`INSERT INTO messages (timestamp,conn_id,conn_name,topic,payload,payload_bytes,qos,retained,is_sparkplug)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		m.Timestamp.UTC().Format(time.RFC3339Nano),
-		m.ConnID, m.ConnName, m.Topic, m.Payload, m.QoS, r, sp,
+		m.ConnID, m.ConnName, m.Topic, m.Payload, m.PayloadBytes, m.QoS, r, sp,
 	)
 	return err
 }
@@ -115,7 +157,7 @@ func (s *Store) Query(f Filter) (QueryResult, error) {
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,timestamp,conn_id,conn_name,topic,payload,qos,retained,is_sparkplug FROM messages"+
+		"SELECT id,timestamp,conn_id,conn_name,topic,payload,payload_bytes,qos,retained,is_sparkplug FROM messages"+
 			wc.sql+" ORDER BY id DESC LIMIT ? OFFSET ?",
 		wc.append(f.Limit, f.Offset)...,
 	)
@@ -129,7 +171,7 @@ func (s *Store) Query(f Filter) (QueryResult, error) {
 		var m Message
 		var ts string
 		var retained, isSp int
-		if err := rows.Scan(&m.ID, &ts, &m.ConnID, &m.ConnName, &m.Topic, &m.Payload, &m.QoS, &retained, &isSp); err != nil {
+		if err := rows.Scan(&m.ID, &ts, &m.ConnID, &m.ConnName, &m.Topic, &m.Payload, &m.PayloadBytes, &m.QoS, &retained, &isSp); err != nil {
 			return QueryResult{}, err
 		}
 		m.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)

@@ -260,6 +260,50 @@
     .event-detail .retained-label { color: #d2a679; font-size: 10px; background: #3d2b1a; border: 1px solid #7d4e2a; border-radius: 3px; padding: 0 4px; margin: 0 2px; vertical-align: middle; }
     .event-detail .sp-label { color: #a371f7; font-size: 10px; background: #2d1f4a; border: 1px solid #6e40c9; border-radius: 3px; padding: 0 4px; margin: 0 2px; vertical-align: middle; }
     .event-detail .err-label { color: var(--status-error); }
+    .seq-label { color: var(--text-dim); font-size: 10px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; margin: 0 2px; vertical-align: middle; }
+    .seq-label.seq-anomaly { color: #fff; background: #6e1414; border-color: var(--status-error); font-weight: 700; }
+
+    /* ── Sequence summary (header) ───────────────────────────── */
+    .seq-summary {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .seq-summary.ok   { color: var(--status-connected); background: #1a4731; }
+    .seq-summary.warn { color: #ffb4b4; background: #6e1414; }
+
+    /* ── Sequence tracking panel (bottom of tree) ────────────── */
+    .seq-panel {
+      border-top: 2px solid var(--border);
+      margin-top: 8px;
+      padding: 10px 12px 16px;
+    }
+    .seq-panel-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 8px;
+    }
+    table.seq-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.seq-table th {
+      text-align: left;
+      color: var(--text-dim);
+      font-weight: 600;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    table.seq-table td {
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.seq-table td.seq-anomaly-detail { color: #ffb4b4; }
+    tr.seq-row-anomaly td { background: rgba(110,20,20,.25); }
+    tr.seq-row-clean .seq-clean-tag { color: var(--status-connected); }
 
     .event-row.expandable { cursor: pointer; }
     .event-row.expandable:hover { background: #1f2937; }
@@ -474,6 +518,7 @@
     <div class="panel-header">
       <h2 id="panel-title">Event Stream</h2>
       <span id="sse-indicator" style="font-size:11px;color:var(--text-dim)">⬤ disconnected</span>
+      <span id="seq-summary" class="seq-summary" style="display:none" onclick="jumpToSeqPanel()" title="Sparkplug sequence tracking"></span>
       <div id="tree-controls" style="display:none;gap:4px;align-items:center">
         <button class="btn-sm" onclick="expandAll()">Expand All</button>
         <button class="btn-sm" onclick="collapseAll()">Collapse All</button>
@@ -971,6 +1016,12 @@ function handleSSEEvent(event) {
   }
 
   if (event.type === 'message') {
+    if (event.isSparkplug) {
+      const ann = computeSeqAnnotation(liveSeqTracker, event);
+      event._seq = ann ? ann.seq : null;
+      event._seqAnomaly = ann ? ann.anomaly : null;
+      renderSeqSummary();
+    }
     messageLog.unshift(event);
     if (messageLog.length > MAX_LOG) messageLog.pop();
     updateTopicTreeData(event);
@@ -1068,6 +1119,18 @@ async function loadHistory() {
     bar.style.display = 'flex';
     document.getElementById('history-status').textContent =
       `${data.messages.length} of ${data.total} stored messages`;
+
+    // Replay chronologically (oldest first) through a scratch tracker so each
+    // history row can show whether it was a seq gap/reorder at the time.
+    const historyTracker = { nodes: {}, totalAnomalies: 0 };
+    const chronological = [...data.messages].reverse();
+    for (const msg of chronological) {
+      if (msg.type === 'message' && msg.isSparkplug) {
+        const ann = computeSeqAnnotation(historyTracker, msg);
+        msg._seq = ann ? ann.seq : null;
+        msg._seqAnomaly = ann ? ann.anomaly : null;
+      }
+    }
 
     const list = document.getElementById('events-list');
     list.innerHTML = '';
@@ -1195,6 +1258,8 @@ function renderTopicTree() {
     details.appendChild(wrap);
     container.appendChild(details);
   }
+
+  container.appendChild(buildSeqTrackingPanel());
 }
 
 // pathPrefix accumulates the full topic path so each <details> gets a stable,
@@ -1231,6 +1296,7 @@ function renderTreeChildren(container, children, pathPrefix, depth) {
         `<span class="tree-dim">q${e.qos ?? 0}</span>`,
         e.retained    ? `<span class="retained-label">R</span>` : '',
         e.isSparkplug ? `<span class="sp-label">SP</span>`    : '',
+        seqTag(e),
       ].join('') : '';
       div.innerHTML = `<span class="tree-segment">${esc(seg)}</span> <span class="tree-dim">→</span> ${val}${tags}`;
       if (e) div.addEventListener('click', () => showMsgDetail(e));
@@ -1321,8 +1387,9 @@ function detailFor(event) {
     const qos      = `<span class="qos-label">q${event.qos ?? 0}</span>`;
     const retained = event.retained    ? `<span class="retained-label">R</span>` : '';
     const sparkplug = event.isSparkplug ? `<span class="sp-label">SP</span>` : '';
+    const seq      = seqTag(event);
     const payload  = event.payload ? `<span class="payload-label">${esc(truncate(event.payload, 120))}</span>` : '';
-    return `${name}${topic}${qos}${retained}${sparkplug}${payload}`;
+    return `${name}${topic}${qos}${retained}${sparkplug}${seq}${payload}`;
   }
   if (event.type === 'connection_status') {
     const err = event.error ? ` <span class="err-label">— ${esc(event.error)}</span>` : '';
@@ -1445,6 +1512,186 @@ function initSparkplug() {
   } catch (e) {
     console.warn('Sparkplug B decoder init failed:', e);
   }
+}
+
+// ── Sparkplug sequence tracking ──────────────────────────────
+// Per the Sparkplug B spec, each edge node maintains a single seq counter
+// (0-255, wrapping) shared by its NBIRTH/NDATA/NDEATH and all of its
+// devices' DBIRTH/DDATA/DDEATH messages. NBIRTH resets the counter; every
+// other message must be exactly one more than the last (mod 256).
+// NDEATH carries no seq (it's a pre-registered MQTT will), so it's ignored.
+const liveSeqTracker = { nodes: {}, totalAnomalies: 0 };
+
+function parseSparkplugTopic(topic) {
+  if (!topic) return null;
+  const segs = topic.split('/');
+  if (segs.length < 4) return null;
+  const [namespace, group, msgType, edgeNode] = segs;
+  if (!/^sp[AB]v1\.0$/.test(namespace)) return null;
+  if (!/^[ND](BIRTH|DATA|DEATH)$/.test(msgType)) return null;
+  return { namespace, group, msgType, edgeNode };
+}
+
+// computeSeqAnnotation decodes event's Sparkplug payload, updates tracker's
+// per-edge-node state, and returns { seq, anomaly } (or null if this message
+// carries no trackable seq). anomaly is null when in-order, otherwise
+// { type: 'gap'|'reorder', expected, got, missed|behindBy }.
+function computeSeqAnnotation(tracker, event) {
+  const parsed = parseSparkplugTopic(event.topic);
+  if (!parsed) return null;
+  const decoded = tryDecodeSparkplug(event.payloadBytes);
+  if (!decoded || decoded.seq == null) return null;
+
+  const seq = decoded.seq;
+  const key = `${event.connectionId}::${parsed.group}/${parsed.edgeNode}`;
+  let node = tracker.nodes[key];
+
+  if (!node) {
+    node = tracker.nodes[key] = {
+      key, connId: event.connectionId, connName: event.name || event.connectionId,
+      group: parsed.group, edgeNode: parsed.edgeNode,
+      lastSeq: seq, expectedNext: (seq + 1) % 256,
+      birthSeen: parsed.msgType === 'NBIRTH',
+      msgCount: 1, gapCount: 0, reorderCount: 0, lastAnomaly: null, lastSeenTime: event.timestamp,
+    };
+    return { seq, anomaly: null };
+  }
+
+  node.connName = event.name || node.connName;
+  node.msgCount++;
+  node.lastSeenTime = event.timestamp;
+
+  if (parsed.msgType === 'NBIRTH') {
+    // A new birth legitimately restarts the counter — resync, don't flag.
+    node.lastSeq = seq;
+    node.expectedNext = (seq + 1) % 256;
+    node.birthSeen = true;
+    return { seq, anomaly: null };
+  }
+
+  if (!node.birthSeen) {
+    // Joined the stream mid-session with no NBIRTH observed yet — use this
+    // message as the new baseline rather than reporting a false gap.
+    node.lastSeq = seq;
+    node.expectedNext = (seq + 1) % 256;
+    node.birthSeen = true;
+    return { seq, anomaly: null };
+  }
+
+  let anomaly = null;
+  if (seq !== node.expectedNext) {
+    const diff = (seq - node.expectedNext + 256) % 256;
+    if (diff <= 127) {
+      anomaly = { type: 'gap', expected: node.expectedNext, got: seq, missed: diff };
+      node.gapCount++;
+    } else {
+      anomaly = { type: 'reorder', expected: node.expectedNext, got: seq, behindBy: 256 - diff };
+      node.reorderCount++;
+    }
+    node.lastAnomaly = { ...anomaly, time: event.timestamp };
+    tracker.totalAnomalies = (tracker.totalAnomalies || 0) + 1;
+  }
+  node.lastSeq = seq;
+  node.expectedNext = (seq + 1) % 256;
+  return { seq, anomaly };
+}
+
+function describeAnomaly(a) {
+  if (!a) return '';
+  return a.type === 'gap'
+    ? `expected seq ${a.expected}, got ${a.got} — ${a.missed} message${a.missed !== 1 ? 's' : ''} missing`
+    : `expected seq ${a.expected}, got ${a.got} — out of order (behind by ${a.behindBy})`;
+}
+
+function seqTag(event) {
+  if (event._seq == null) return '';
+  if (event._seqAnomaly) {
+    const title = esc(describeAnomaly(event._seqAnomaly));
+    return `<span class="seq-label seq-anomaly" title="${title}">seq ${event._seq} ⚠</span>`;
+  }
+  return `<span class="seq-label" title="seq ${event._seq}">seq ${event._seq}</span>`;
+}
+
+function renderSeqSummary() {
+  const el = document.getElementById('seq-summary');
+  const nodes = Object.values(liveSeqTracker.nodes);
+  if (nodes.length === 0) { el.style.display = 'none'; return; }
+
+  el.style.display = 'inline-block';
+  const total = liveSeqTracker.totalAnomalies || 0;
+  if (total === 0) {
+    el.textContent = `● Seq OK (${nodes.length} node${nodes.length !== 1 ? 's' : ''})`;
+    el.className = 'seq-summary ok';
+    el.title = 'No Sparkplug sequence gaps or reordering detected. Click for details.';
+  } else {
+    el.textContent = `● Seq: ${total} issue${total !== 1 ? 's' : ''}`;
+    el.className = 'seq-summary warn';
+    const worst = nodes
+      .filter(n => n.lastAnomaly)
+      .sort((a, b) => new Date(b.lastAnomaly.time) - new Date(a.lastAnomaly.time))[0];
+    el.title = worst
+      ? `Most recent: ${worst.connName} ${worst.group}/${worst.edgeNode} — ${describeAnomaly(worst.lastAnomaly)}. Click for details.`
+      : 'Sequence anomalies detected. Click for details.';
+  }
+}
+
+function jumpToSeqPanel() {
+  switchView('tree');
+  requestAnimationFrame(() => {
+    document.getElementById('seq-tracking-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function buildSeqTrackingPanel() {
+  const section = document.createElement('div');
+  section.className = 'seq-panel';
+  section.id = 'seq-tracking-panel';
+
+  const title = document.createElement('div');
+  title.className = 'seq-panel-title';
+  title.textContent = 'Sparkplug Sequence Tracking';
+  section.appendChild(title);
+
+  const nodes = Object.values(liveSeqTracker.nodes)
+    .sort((a, b) => (a.connName + a.group + a.edgeNode).localeCompare(b.connName + b.group + b.edgeNode));
+
+  if (nodes.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'No Sparkplug edge nodes seen yet on the live stream.';
+    section.appendChild(empty);
+    return section;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'seq-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>Edge Node</th><th>Last Seq</th><th>Next Expected</th>
+      <th>Messages</th><th>Gaps</th><th>Reorders</th><th>Last Anomaly</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+
+  for (const n of nodes) {
+    const hasIssues = n.gapCount + n.reorderCount > 0;
+    const tr = document.createElement('tr');
+    tr.className = hasIssues ? 'seq-row-anomaly' : 'seq-row-clean';
+    const lastAnomalyHtml = n.lastAnomaly
+      ? `<span class="seq-anomaly-detail">${esc(describeAnomaly(n.lastAnomaly))} (${esc(formatTime(n.lastAnomaly.time))})</span>`
+      : `<span class="seq-clean-tag">— none —</span>`;
+    tr.innerHTML = `
+      <td>${esc(n.connName)} / ${esc(n.group)}/${esc(n.edgeNode)}</td>
+      <td>${n.lastSeq}</td>
+      <td>${n.expectedNext}</td>
+      <td>${n.msgCount}</td>
+      <td>${n.gapCount}</td>
+      <td>${n.reorderCount}</td>
+      <td>${lastAnomalyHtml}</td>`;
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  section.appendChild(table);
+  return section;
 }
 
 function tryDecodeSparkplug(base64str) {
