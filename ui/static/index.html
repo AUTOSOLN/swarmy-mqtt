@@ -378,6 +378,8 @@
       resize: vertical;
       min-height: 100px;
     }
+    .field textarea.pem { min-height: 64px; font-size: 11px; }
+    .field .btn-sm { align-self: flex-start; }
     .field textarea:focus {
       outline: none;
       border-color: var(--focus);
@@ -608,6 +610,35 @@
               <input id="f-cleansession" type="checkbox" />
               <label for="f-cleansession">Clean Session</label>
             </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-section-title">TLS</div>
+          <div class="form-grid">
+            <div class="field full">
+              <small style="color:var(--text-dim)">Used when the server URL starts with mqtts://. Leave the CA empty to trust the system's certificate authorities; add a client certificate and key for mutual TLS.</small>
+            </div>
+            <div class="field checkbox-row full">
+              <input id="f-tlsinsecure" type="checkbox" />
+              <label for="f-tlsinsecure">Skip server certificate verification (insecure)</label>
+            </div>
+            <div class="field full">
+              <label for="f-tlscacert">CA Certificate (PEM) <small style="color:var(--text-dim)">(optional)</small></label>
+              <textarea id="f-tlscacert" class="pem" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
+              <button type="button" class="btn-sm" onclick="loadPemFile('f-tlscacert')">Load file…</button>
+            </div>
+            <div class="field full">
+              <label for="f-tlsclientcert">Client Certificate (PEM) <small style="color:var(--text-dim)">(mutual TLS)</small></label>
+              <textarea id="f-tlsclientcert" class="pem" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
+              <button type="button" class="btn-sm" onclick="loadPemFile('f-tlsclientcert')">Load file…</button>
+            </div>
+            <div class="field full">
+              <label for="f-tlsclientkey">Client Key (PEM, unencrypted) <small style="color:var(--text-dim)">(mutual TLS)</small></label>
+              <textarea id="f-tlsclientkey" class="pem" placeholder="-----BEGIN PRIVATE KEY-----" spellcheck="false"></textarea>
+              <button type="button" class="btn-sm" onclick="loadPemFile('f-tlsclientkey')">Load file…</button>
+            </div>
+            <input id="pem-file" type="file" accept=".pem,.crt,.cer,.key,.txt" hidden />
           </div>
         </div>
 
@@ -865,8 +896,23 @@ function resetForm() {
   document.getElementById('f-willqos').value     = '0';
   document.getElementById('f-willpayload').value = '';
   document.getElementById('f-willretain').checked = false;
+  document.getElementById('f-tlsinsecure').checked  = false;
+  document.getElementById('f-tlscacert').value      = '';
+  document.getElementById('f-tlsclientcert').value  = '';
+  document.getElementById('f-tlsclientkey').value   = '';
   document.getElementById('subs-container').innerHTML = '';
   updateProtocolFields();
+}
+
+// loadPemFile reads a local file into the given PEM text area.
+function loadPemFile(targetId) {
+  const input = document.getElementById('pem-file');
+  input.value = '';
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (file) document.getElementById(targetId).value = await file.text();
+  };
+  input.click();
 }
 
 // Session expiry is an MQTT 5 CONNECT property; MQTT 3.1.1 has none.
@@ -890,6 +936,10 @@ function populateForm(c) {
   document.getElementById('f-willqos').value     = c.willqos     ?? 0;
   document.getElementById('f-willpayload').value = c.willpayload || '';
   document.getElementById('f-willretain').checked = !!c.willretain;
+  document.getElementById('f-tlsinsecure').checked  = !!c.tlsinsecure;
+  document.getElementById('f-tlscacert').value      = c.tlscacert     || '';
+  document.getElementById('f-tlsclientcert').value  = c.tlsclientcert || '';
+  document.getElementById('f-tlsclientkey').value   = c.tlsclientkey  || '';
   (c.subs || []).forEach(s => addSubRow(s.topic, s.qos));
   updateProtocolFields();
 }
@@ -932,6 +982,10 @@ function getFormData() {
     willqos:               Number.parseInt(document.getElementById('f-willqos').value, 10),
     willpayload:           document.getElementById('f-willpayload').value.trim(),
     willretain:            document.getElementById('f-willretain').checked,
+    tlsinsecure:           document.getElementById('f-tlsinsecure').checked,
+    tlscacert:             document.getElementById('f-tlscacert').value.trim(),
+    tlsclientcert:         document.getElementById('f-tlsclientcert').value.trim(),
+    tlsclientkey:          document.getElementById('f-tlsclientkey').value.trim(),
     subs,
   };
 }

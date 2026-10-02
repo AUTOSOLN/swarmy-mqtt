@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +13,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +65,13 @@ type ConnectionItem struct {
 	WillQoS               byte           `json:"willqos"`
 	WillRetain            bool           `json:"willretain"`
 	Subscriptions         []TopicQosItem `json:"subs"`
+
+	// TLS applies to mqtts://, ssl:// and tls:// server URLs. Certificates
+	// and the key are PEM text, persisted with the rest of the item.
+	TLSCACert     string `json:"tlscacert"`     // trusted CA(s); empty = system roots
+	TLSClientCert string `json:"tlsclientcert"` // client certificate for mutual TLS
+	TLSClientKey  string `json:"tlsclientkey"`  // unencrypted private key for TLSClientCert
+	TLSInsecure   bool   `json:"tlsinsecure"`   // skip server certificate verification
 }
 
 // --- SSE ---
@@ -321,7 +331,7 @@ func mqttConnect(w http.ResponseWriter, r *http.Request) {
 // connectOne starts a connection for item that reconnects until it is
 // disconnected or fails permanently. Caller must hold activeConnsMu.
 func connectOne(item ConnectionItem) {
-	client, err := mqttclient.New(clientOptions(item), clientHandlers(item))
+	client, err := newClient(item)
 	if err != nil {
 		events.publish(statusEvent(item.ID, item.Name, "error", fmt.Sprintf("invalid connection settings: %v", err)))
 		return
@@ -350,7 +360,15 @@ func connectOne(item ConnectionItem) {
 	}()
 }
 
-func clientOptions(item ConnectionItem) mqttclient.Options {
+func newClient(item ConnectionItem) (*mqttclient.Client, error) {
+	opts, err := clientOptions(item)
+	if err != nil {
+		return nil, err
+	}
+	return mqttclient.New(opts, clientHandlers(item))
+}
+
+func clientOptions(item ConnectionItem) (mqttclient.Options, error) {
 	opts := mqttclient.Options{
 		Server:          item.MqttServerUrl,
 		ProtocolVersion: protocolVersion(item),
@@ -377,7 +395,53 @@ func clientOptions(item ConnectionItem) mqttclient.Options {
 			Retain:  item.WillRetain,
 		}
 	}
-	return opts
+	tlsCfg, err := tlsConfig(item)
+	if err != nil {
+		return opts, err
+	}
+	opts.TLSConfig = tlsCfg
+	return opts, nil
+}
+
+// tlsConfig builds the TLS configuration for item, or returns nil for a
+// plain TCP server URL.
+func tlsConfig(item ConnectionItem) (*tls.Config, error) {
+	hasTLSSettings := item.TLSCACert != "" || item.TLSClientCert != "" || item.TLSClientKey != "" || item.TLSInsecure
+	u, err := url.Parse(item.MqttServerUrl)
+	if err != nil {
+		return nil, err // mqttclient.New reports it in more detail
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "mqtts", "ssl", "tls":
+	default:
+		if hasTLSSettings {
+			return nil, fmt.Errorf("TLS settings need an mqtts:// server URL, not %s://", u.Scheme)
+		}
+		return nil, nil
+	}
+
+	cfg := &tls.Config{
+		// The user chose to skip verification, e.g. for a self-signed test broker.
+		InsecureSkipVerify: item.TLSInsecure, // #nosec G402
+	}
+	if item.TLSCACert != "" {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(item.TLSCACert)) {
+			return nil, errors.New("CA certificate: no PEM certificate found")
+		}
+		cfg.RootCAs = pool
+	}
+	if item.TLSClientCert != "" || item.TLSClientKey != "" {
+		if item.TLSClientCert == "" || item.TLSClientKey == "" {
+			return nil, errors.New("mutual TLS needs both a client certificate and its key")
+		}
+		cert, err := tls.X509KeyPair([]byte(item.TLSClientCert), []byte(item.TLSClientKey))
+		if err != nil {
+			return nil, fmt.Errorf("client certificate/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg, nil
 }
 
 // protocolVersion returns the item's MQTT version; items saved before the
