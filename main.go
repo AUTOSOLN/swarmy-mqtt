@@ -5,19 +5,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/paho"
+	mqttclient "github.com/AUTOSOLN/mqtt-client"
 	"github.com/gorilla/mux"
 
 	"github.com/AUTOSOLN/swarmy-mqtt/ui"
@@ -51,6 +50,7 @@ type ConnectionItem struct {
 	ID                    string         `json:"id"`
 	Name                  string         `json:"name"`
 	MqttServerUrl         string         `json:"mqttserverurl"`
+	ProtocolVersion       byte           `json:"protocolversion"` // 4 = MQTT 3.1.1, 5 = MQTT 5 (default)
 	MqttKeepAlive         uint16         `json:"keepalive"`
 	CleanSession          bool           `json:"cleansession"`
 	SessionExpiryInterval uint32         `json:"sessionexpiryinterval"`
@@ -120,8 +120,8 @@ func (b *sseBroker) publish(event SSEEvent) {
 // --- MQTT state ---
 
 type mqttConn struct {
-	manager *autopaho.ConnectionManager
-	cancel  context.CancelFunc
+	client *mqttclient.Client
+	cancel context.CancelFunc
 }
 
 // --- Global state ---
@@ -318,119 +318,176 @@ func mqttConnect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// connectOne starts an autopaho connection for item. Caller must hold activeConnsMu.
+// connectOne starts a connection for item that reconnects until it is
+// disconnected or fails permanently. Caller must hold activeConnsMu.
 func connectOne(item ConnectionItem) {
-	serverURL, err := url.Parse(item.MqttServerUrl)
+	client, err := mqttclient.New(clientOptions(item), clientHandlers(item))
 	if err != nil {
-		log.Printf("invalid URL for %q: %v", item.Name, err)
-		events.publish(statusEvent(item.ID, item.Name, "error", fmt.Sprintf("invalid server URL: %v", err)))
+		events.publish(statusEvent(item.ID, item.Name, "error", fmt.Sprintf("invalid connection settings: %v", err)))
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg := buildConnConfig(item, serverURL, ctx)
-
-	cm, err := autopaho.NewConnection(ctx, cfg)
-	if err != nil {
-		cancel()
-		log.Printf("failed to create connection for %q: %v", item.Name, err)
-		events.publish(statusEvent(item.ID, item.Name, "error", err.Error()))
-		return
-	}
-
-	activeConns[item.ID] = &mqttConn{manager: cm, cancel: cancel}
+	conn := &mqttConn{client: client, cancel: cancel}
+	activeConns[item.ID] = conn
 	events.publish(statusEvent(item.ID, item.Name, "connecting", ""))
+
+	go func() {
+		err := client.Run(ctx)
+		cancel()
+		// Run returns nil after Disconnect and ctx.Err() after cancel; any
+		// other error is permanent (refused credentials, protocol error, bad
+		// certificate) and Run has stopped retrying. OnConnectError or
+		// OnDisconnect has already reported the error itself.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			publishError(item.ID, item.Name, "stopped reconnecting: %v", err)
+		}
+		activeConnsMu.Lock()
+		if activeConns[item.ID] == conn {
+			delete(activeConns, item.ID)
+		}
+		activeConnsMu.Unlock()
+	}()
 }
 
-func buildConnConfig(item ConnectionItem, serverURL *url.URL, ctx context.Context) autopaho.ClientConfig {
-	cfg := autopaho.ClientConfig{
-		ServerUrls:                    []*url.URL{serverURL},
-		KeepAlive:                     item.MqttKeepAlive,
-		CleanStartOnInitialConnection: item.CleanSession,
-		SessionExpiryInterval:         item.SessionExpiryInterval,
-		ConnectUsername:               item.Username,
-		ConnectPassword:               []byte(item.Password),
-		OnConnectionUp:                onConnectionUp(item, ctx),
-		OnConnectError: func(err error) {
-			events.publish(statusEvent(item.ID, item.Name, "error", err.Error()))
-		},
-		ClientConfig: paho.ClientConfig{
-			ClientID:          item.ClientId,
-			OnPublishReceived: []func(paho.PublishReceived) (bool, error){onPublishReceived(item)},
-			OnClientError: func(err error) {
-				events.publish(statusEvent(item.ID, item.Name, "error", err.Error()))
-			},
-			OnServerDisconnect: func(d *paho.Disconnect) {
-				var reason string
-				if d.Properties != nil {
-					reason = d.Properties.ReasonString
-				}
-				events.publish(statusEvent(item.ID, item.Name, "disconnected", reason))
-			},
-		},
+func clientOptions(item ConnectionItem) mqttclient.Options {
+	opts := mqttclient.Options{
+		Server:          item.MqttServerUrl,
+		ProtocolVersion: protocolVersion(item),
+		ClientID:        item.ClientId,
+		// An empty client id makes the server assign one, so there is no
+		// session to resume; the client requires clean start for it.
+		CleanStart: item.CleanSession || item.ClientId == "",
+		KeepAlive:  item.MqttKeepAlive,
+		Username:   item.Username,
+		Password:   []byte(item.Password),
+	}
+	// Session expiry is a CONNECT property, which MQTT 3.1.1 does not have.
+	if opts.ProtocolVersion == mqttclient.MQTT5 && item.SessionExpiryInterval > 0 {
+		opts.ConnectProperties = &mqttclient.Properties{
+			SessionExpiryInterval:     item.SessionExpiryInterval,
+			SessionExpiryIntervalFlag: true,
+		}
 	}
 	if item.WillTopic != "" {
-		cfg.WillMessage = &paho.WillMessage{
-			Retain:  item.WillRetain,
-			QoS:     item.WillQoS,
+		opts.Will = &mqttclient.Message{
 			Topic:   item.WillTopic,
 			Payload: []byte(item.WillPayload),
+			QoS:     item.WillQoS,
+			Retain:  item.WillRetain,
 		}
-		cfg.WillProperties = &paho.WillProperties{}
 	}
-	return cfg
+	return opts
 }
 
-func onConnectionUp(item ConnectionItem, ctx context.Context) func(*autopaho.ConnectionManager, *paho.Connack) {
-	return func(cm *autopaho.ConnectionManager, _ *paho.Connack) {
-		events.publish(statusEvent(item.ID, item.Name, "connected", ""))
-		if len(item.Subscriptions) == 0 {
+// protocolVersion returns the item's MQTT version; items saved before the
+// option existed have none and use MQTT 5.
+func protocolVersion(item ConnectionItem) byte {
+	if item.ProtocolVersion == 0 {
+		return mqttclient.MQTT5
+	}
+	return item.ProtocolVersion
+}
+
+func clientHandlers(item ConnectionItem) mqttclient.Handlers {
+	return mqttclient.Handlers{
+		OnConnect: func(c *mqttclient.Client, ack mqttclient.ConnAck) {
+			if ack.ReasonCode != 0 {
+				return // refusals are reported by OnConnectError
+			}
+			events.publish(statusEvent(item.ID, item.Name, "connected", ""))
+			subscribe(c, item)
+		},
+		OnConnectError: func(_ *mqttclient.Client, err error) {
+			events.publish(statusEvent(item.ID, item.Name, "error", err.Error()))
+		},
+		OnDisconnect: func(_ *mqttclient.Client, ev mqttclient.DisconnectEvent) {
+			var refused *mqttclient.ConnRefusedError
+			switch {
+			case ev.Err == nil:
+				// Disconnect was called; the HTTP handler reports it.
+			case errors.As(ev.Err, &refused):
+				// Reported by OnConnectError.
+			case errors.Is(ev.Err, mqttclient.ErrServerDisconnect):
+				reason := mqttclient.ReasonCodeString(ev.ReasonCode)
+				if ev.Properties != nil && ev.Properties.ReasonString != "" {
+					reason = ev.Properties.ReasonString
+				}
+				events.publish(statusEvent(item.ID, item.Name, "disconnected", reason))
+			default:
+				events.publish(statusEvent(item.ID, item.Name, "error", ev.Err.Error()))
+			}
+		},
+		OnMessage: onMessage(item),
+	}
+}
+
+// subscribe sends the item's subscriptions. It runs from OnConnect, which
+// must not block, so the acknowledgement is awaited on another goroutine.
+func subscribe(c *mqttclient.Client, item ConnectionItem) {
+	if len(item.Subscriptions) == 0 {
+		return
+	}
+	subs := make([]mqttclient.Subscription, len(item.Subscriptions))
+	for i, s := range item.Subscriptions {
+		subs[i] = mqttclient.Subscription{Topic: s.Topic, QoS: byte(s.QoS)}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	p, err := c.Subscribe(ctx, subs, nil)
+	if err != nil {
+		cancel()
+		publishError(item.ID, item.Name, "subscribe failed: %v", err)
+		return
+	}
+	go func() {
+		defer cancel()
+		res, err := p.Wait(ctx)
+		var refused *mqttclient.ReasonCodeError
+		if err != nil && !errors.As(err, &refused) {
+			publishError(item.ID, item.Name, "subscribe failed: %v", err)
 			return
 		}
-		subs := make([]paho.SubscribeOptions, len(item.Subscriptions))
-		for i, s := range item.Subscriptions {
-			subs[i] = paho.SubscribeOptions{Topic: s.Topic, QoS: byte(s.QoS)}
+		// SUBACK has one code per filter; report each refused one.
+		for i, code := range res.ReasonCodes {
+			if code >= 0x80 && i < len(subs) {
+				publishError(item.ID, item.Name, "subscribe to %q refused: %s (0x%02x)",
+					subs[i].Topic, mqttclient.ReasonCodeString(code), code)
+			}
 		}
-		subCtx, subCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer subCancel()
-		if _, err := cm.Subscribe(subCtx, &paho.Subscribe{Subscriptions: subs}); err != nil {
-			log.Printf("subscribe error for %q: %v", item.Name, err)
-		}
-	}
+	}()
 }
 
 func isSparkplugTopic(topic string) bool {
 	return strings.HasPrefix(topic, "spBv1.0/")
 }
 
-func onPublishReceived(item ConnectionItem) func(paho.PublishReceived) (bool, error) {
-	return func(pr paho.PublishReceived) (bool, error) {
-		isSP := isSparkplugTopic(pr.Packet.Topic)
+func onMessage(item ConnectionItem) func(*mqttclient.Client, *mqttclient.Message) {
+	return func(_ *mqttclient.Client, m *mqttclient.Message) {
+		isSP := isSparkplugTopic(m.Topic)
 		events.publish(SSEEvent{
 			Type:         "message",
 			ConnectionID: item.ID,
 			Name:         item.Name,
-			Topic:        pr.Packet.Topic,
-			Payload:      string(pr.Packet.Payload),
-			PayloadBytes: pr.Packet.Payload,
-			QoS:          pr.Packet.QoS,
-			Retained:     pr.Packet.Retain,
+			Topic:        m.Topic,
+			Payload:      string(m.Payload),
+			PayloadBytes: m.Payload,
+			QoS:          m.QoS,
+			Retained:     m.Retain,
 			IsSparkplug:  isSP,
 		})
 		if err := msgDB.Write(msgstore.Message{
 			Timestamp:    time.Now().UTC(),
 			ConnID:       item.ID,
 			ConnName:     item.Name,
-			Topic:        pr.Packet.Topic,
-			Payload:      string(pr.Packet.Payload),
-			PayloadBytes: pr.Packet.Payload,
-			QoS:          int(pr.Packet.QoS),
-			Retained:     pr.Packet.Retain,
+			Topic:        m.Topic,
+			Payload:      string(m.Payload),
+			PayloadBytes: m.Payload,
+			QoS:          int(m.QoS),
+			Retained:     m.Retain,
 			IsSparkplug:  isSP,
 		}); err != nil {
 			log.Printf("msgstore write: %v", err)
 		}
-		return true, nil
 	}
 }
 
@@ -524,6 +581,19 @@ func statusEvent(id, name, status, errMsg string) SSEEvent {
 	}
 }
 
+// publishError reports an MQTT error for a connection in the event stream.
+// Unlike a connection_status event it does not change the connection's
+// status, since the connection may still be up (a refused subscription, a
+// failed publish).
+func publishError(id, name, format string, args ...any) {
+	events.publish(SSEEvent{
+		Type:         "error",
+		ConnectionID: id,
+		Name:         name,
+		Error:        fmt.Sprintf(format, args...),
+	})
+}
+
 func mqttDisconnect(w http.ResponseWriter, r *http.Request) {
 	activeConnsMu.Lock()
 	conns := make(map[string]*mqttConn, len(activeConns))
@@ -539,8 +609,8 @@ func mqttDisconnect(w http.ResponseWriter, r *http.Request) {
 		connectionItemsMu.Unlock()
 
 		disconnCtx, disconnCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := conn.manager.Disconnect(disconnCtx); err != nil {
-			log.Printf("disconnect error for %q: %v", name, err)
+		if err := conn.client.Disconnect(disconnCtx, 0, nil); err != nil && !errors.Is(err, mqttclient.ErrNoConn) {
+			publishError(id, name, "disconnect failed: %v", err)
 		}
 		disconnCancel()
 		conn.cancel()
@@ -596,8 +666,8 @@ func mqttDisconnectOne(w http.ResponseWriter, r *http.Request) {
 	connectionItemsMu.Unlock()
 
 	disconnCtx, disconnCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := conn.manager.Disconnect(disconnCtx); err != nil {
-		log.Printf("disconnect error for %q: %v", name, err)
+	if err := conn.client.Disconnect(disconnCtx, 0, nil); err != nil && !errors.Is(err, mqttclient.ErrNoConn) {
+		publishError(id, name, "disconnect failed: %v", err)
 	}
 	disconnCancel()
 	conn.cancel()
@@ -642,12 +712,22 @@ func mqttPublish(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	if _, err := conn.manager.Publish(ctx, &paho.Publish{
+	// Wait for the acknowledgement (QoS 1 and 2) so failures reach the caller. On
+	// timeout the message stays queued and is still delivered.
+	p, err := conn.client.Publish(ctx, &mqttclient.Message{
 		QoS:     req.QoS,
 		Topic:   req.Topic,
 		Payload: []byte(req.Payload),
 		Retain:  req.Retain,
-	}); err != nil {
+	})
+	if err == nil {
+		_, err = p.Wait(ctx)
+	}
+	if err != nil {
+		connectionItemsMu.Lock()
+		name := connectionItems[id].Name
+		connectionItemsMu.Unlock()
+		publishError(id, name, "publish to %q failed: %v", req.Topic, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
